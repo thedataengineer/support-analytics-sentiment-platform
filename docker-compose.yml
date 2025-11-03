@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: sentiment_db
+      POSTGRES_USER: sentiment_user
+      POSTGRES_PASSWORD: sentiment_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  elasticsearch:
+    image: elasticsearch:8.16.1
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: sentiment-platform-backend
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://sentiment_user:sentiment_pass@postgres:5432/sentiment_db
+      REDIS_URL: redis://redis:6379/0
+      ML_SERVICE_URL: http://host.docker.internal:5001
+      OLLAMA_URL: http://host.docker.internal:11434
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      LOG_LEVEL: INFO
+      JIRA_PARQUET_PATH: /data/Jira.parquet
+    ports:
+      - "8000:8000"
+    volumes:
+      - /Users/karteek/dev/work/accionlabs/jira-profiler/Jira.parquet:/data/Jira.parquet:ro
+
+  celery:
+    image: sentiment-platform-backend
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://sentiment_user:sentiment_pass@postgres:5432/sentiment_db
+      REDIS_URL: redis://redis:6379/0
+      ML_SERVICE_URL: http://host.docker.internal:5001
+      OLLAMA_URL: http://host.docker.internal:11434
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      LOG_LEVEL: INFO
+      JIRA_PARQUET_PATH: /data/Jira.parquet
+    command: celery -A backend.jobs.celery_config worker --loglevel=info
+    volumes:
+      - /Users/karteek/dev/work/accionlabs/jira-profiler/Jira.parquet:/data/Jira.parquet:ro
+
+volumes:
+  postgres_data:
+  elasticsearch_data:
+  redis_data:
