@@ -1,0 +1,25 @@
+================================================================================
+SENTIMENT TRAJECTORY ANALYSIS REPORT
+Generated: 2025-11-03 15:18:42
+================================================================================
+
+Total Tickets Analyzed: 10
+
+Trajectory Distribution:
+  improving      :   6 ( 60.0%)
+  stable         :   3 ( 30.0%)
+  deteriorating  :   1 ( 10.0%)
+
+Key Findings:
+  • 60.0% of tickets show sentiment improvement
+  • 10.0% of tickets show sentiment deterioration
+  • Average improvement score: 0.359
+
+Top Issue Categories:
+  • general: 5 tickets
+  • bug: 2 tickets
+  • billing: 1 tickets
+  • feature_request: 1 tickets
+  • login: 1 tickets
+
+================================================================================

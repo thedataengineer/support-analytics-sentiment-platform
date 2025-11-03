@@ -1,10 +1,7 @@
-from fastapi import APIRouter, Query, HTTPException, Depends
+from fastapi import APIRouter, Query, HTTPException
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
-from ..database import get_db
-from ..models.sentiment_result import SentimentResult
+from storage.storage_manager import StorageManager
 
 router = APIRouter()
 
@@ -15,119 +12,132 @@ async def get_tickets_with_sentiment(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(20, description="Number of tickets to return"),
-    offset: int = Query(0, description="Number of tickets to skip"),
-    db: Session = Depends(get_db)
+    offset: int = Query(0, description="Number of tickets to skip")
 ):
     """
-    Get tickets with their full sentiment trajectory
-    Returns tickets grouped with all their comments and sentiment analysis
+    Get tickets with their sentiment data using DuckDB on Parquet
     """
+    storage = StorageManager()
+    
+    try:
+        # Build WHERE clause
+        where_conditions = []
+        if q:
+            where_conditions.append(f"(text ILIKE '%{q}%' OR ticket_id ILIKE '%{q}%')")
+        if sentiment:
+            where_conditions.append(f"sentiment = '{sentiment}'")
+        if start_date:
+            where_conditions.append(f"timestamp >= '{start_date}'")
+        if end_date:
+            where_conditions.append(f"timestamp <= '{end_date}'")
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        # Get ticket summary with sentiment aggregation
+        tickets_sql = f"""
+        SELECT 
+            ticket_id,
+            COUNT(*) as total_comments,
+            SUM(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) as positive_count,
+            SUM(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) as negative_count,
+            SUM(CASE WHEN sentiment = 'neutral' THEN 1 ELSE 0 END) as neutral_count,
+            MIN(timestamp) as first_comment_date,
+            MAX(timestamp) as last_comment_date
+        FROM sentiment_data 
+        WHERE {where_clause}
+        GROUP BY ticket_id
+        ORDER BY ticket_id
+        LIMIT {limit} OFFSET {offset}
+        """
+        
+        tickets_df = storage.execute_query(tickets_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        
+        results = []
+        for _, row in tickets_df.iterrows():
+            pos, neg, neu = int(row['positive_count']), int(row['negative_count']), int(row['neutral_count'])
+            
+            # Determine final sentiment
+            if pos > neg and pos > neu:
+                final_sentiment = "positive"
+            elif neg > pos and neg > neu:
+                final_sentiment = "negative"
+            else:
+                final_sentiment = "neutral"
+            
+            ticket_data = {
+                "ticket_id": row['ticket_id'],
+                "total_comments": int(row['total_comments']),
+                "sentiment_distribution": {"positive": pos, "negative": neg, "neutral": neu},
+                "final_sentiment": final_sentiment,
+                "status": f"stable_{final_sentiment}",
+                "first_comment_date": str(row['first_comment_date']),
+                "last_comment_date": str(row['last_comment_date'])
+            }
+            results.append(ticket_data)
+        
+        # Get total count
+        count_sql = f"SELECT COUNT(DISTINCT ticket_id) as total FROM sentiment_data WHERE {where_clause}"
+        count_df = storage.execute_query(count_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        total = int(count_df.iloc[0]['total']) if not count_df.empty else 0
 
-    # Build base query for ticket IDs
-    ticket_query = db.query(SentimentResult.ticket_id).distinct()
+        return {
+            "total": total,
+            "results": results,
+            "offset": offset,
+            "limit": limit
+        }
+        
+    except Exception as e:
+        return {
+            "total": 0,
+            "results": [],
+            "offset": offset,
+            "limit": limit,
+            "error": str(e)
+        }
 
-    # Apply filters
-    if q:
-        ticket_query = ticket_query.filter(
-            or_(
-                SentimentResult.text.ilike(f"%{q}%"),
-                SentimentResult.ticket_id.ilike(f"%{q}%")
-            )
-        )
 
-    if start_date:
-        start = datetime.strptime(start_date, "%Y-%m-%d")
-        ticket_query = ticket_query.filter(SentimentResult.comment_timestamp >= start)
+@router.get("/tickets/{ticket_id}")
+async def get_ticket_detail(ticket_id: str):
+    """
+    Get detailed sentiment trajectory for a specific ticket using DuckDB
+    """
+    storage = StorageManager()
+    
+    try:
+        # Get all sentiment data for this ticket
+        detail_sql = f"""
+        SELECT ticket_id, text, sentiment, confidence, field_type, timestamp
+        FROM sentiment_data 
+        WHERE ticket_id = '{ticket_id}'
+        ORDER BY timestamp ASC
+        """
+        
+        sentiments_df = storage.execute_query(detail_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        
+        if sentiments_df.empty:
+            raise HTTPException(status_code=404, detail="Ticket not found")
 
-    if end_date:
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-        ticket_query = ticket_query.filter(SentimentResult.comment_timestamp <= end + timedelta(days=1))
-
-    # Get total count of tickets
-    total_tickets = ticket_query.count()
-
-    # Get paginated ticket IDs
-    ticket_ids = [
-        row[0] for row in ticket_query
-        .order_by(SentimentResult.ticket_id)
-        .offset(offset)
-        .limit(limit)
-        .all()
-    ]
-
-    # Get all sentiment results for these tickets
-    results = []
-    for ticket_id in ticket_ids:
-        # Get all sentiment records for this ticket, removing duplicates by keeping latest created_at
-        sentiments_subquery = (
-            db.query(
-                SentimentResult.id,
-                func.row_number().over(
-                    partition_by=[
-                        SentimentResult.ticket_id,
-                        SentimentResult.field_type,
-                        SentimentResult.comment_number,
-                        SentimentResult.text
-                    ],
-                    order_by=SentimentResult.created_at.desc()
-                ).label('rn')
-            )
-            .filter(SentimentResult.ticket_id == ticket_id)
-            .subquery()
-        )
-
-        # Get unique sentiment records
-        sentiments = (
-            db.query(SentimentResult)
-            .join(sentiments_subquery, SentimentResult.id == sentiments_subquery.c.id)
-            .filter(sentiments_subquery.c.rn == 1)
-            .order_by(
-                SentimentResult.comment_timestamp.asc().nullslast(),
-                SentimentResult.comment_number.asc().nullslast()
-            )
-            .all()
-        )
-
-        if not sentiments:
-            continue
-
-        # Build comments list
+        # Build detailed comments
         comments = []
         sentiment_scores = {'positive': 0, 'negative': 0, 'neutral': 0}
-        negative_entities = []  # Track negative sentiment items
 
-        for sent in sentiments:
+        for _, row in sentiments_df.iterrows():
             comment_data = {
-                "field_type": sent.field_type or "unknown",
-                "text": sent.text[:200] + "..." if len(sent.text) > 200 else sent.text,
-                "full_text": sent.text,
-                "sentiment": sent.sentiment,
-                "confidence": sent.confidence,
-                "comment_timestamp": sent.comment_timestamp.isoformat() if sent.comment_timestamp else None,
-                "comment_number": sent.comment_number,
-                "author_id": sent.author_id,
-                "created_at": sent.created_at.isoformat() if sent.created_at else None
+                "field_type": row['field_type'] or "unknown",
+                "text": row['text'],
+                "sentiment": row['sentiment'],
+                "confidence": float(row['confidence']),
+                "comment_timestamp": str(row['timestamp'])
             }
             comments.append(comment_data)
+            sentiment_scores[row['sentiment']] += 1
 
-            # Count sentiments for final aggregation
-            if sent.sentiment in sentiment_scores:
-                sentiment_scores[sent.sentiment] += 1
-
-            # Track negative entities with their context
-            if sent.sentiment == 'negative':
-                negative_entities.append({
-                    "field_type": sent.field_type or "unknown",
-                    "text_snippet": sent.text[:150] + "..." if len(sent.text) > 150 else sent.text,
-                    "confidence": sent.confidence,
-                    "timestamp": sent.comment_timestamp.isoformat() if sent.comment_timestamp else None
-                })
-
-        # Calculate final sentiment (most common)
+        # Calculate final sentiment
         final_sentiment = max(sentiment_scores, key=sentiment_scores.get)
         total_comments = sum(sentiment_scores.values())
 
-        # Calculate sentiment trajectory status
+        # Calculate trajectory
         if len(comments) >= 2:
             first_sentiment = comments[0]['sentiment']
             last_sentiment = comments[-1]['sentiment']
@@ -143,103 +153,18 @@ async def get_tickets_with_sentiment(
         else:
             status = f'single_{comments[0]["sentiment"]}' if comments else 'unknown'
 
-        # Apply sentiment filter if specified
-        if sentiment and final_sentiment != sentiment:
-            continue
-
-        # Build ticket object
-        ticket_data = {
+        return {
             "ticket_id": ticket_id,
             "total_comments": total_comments,
             "sentiment_distribution": sentiment_scores,
             "final_sentiment": final_sentiment,
             "status": status,
             "comments": comments,
-            "negative_entities": negative_entities,
-            "negative_count": len(negative_entities),
             "first_comment_date": comments[0]['comment_timestamp'] if comments else None,
             "last_comment_date": comments[-1]['comment_timestamp'] if comments else None
         }
-
-        results.append(ticket_data)
-
-    return {
-        "total": total_tickets,
-        "results": results,
-        "offset": offset,
-        "limit": limit
-    }
-
-
-@router.get("/tickets/{ticket_id}")
-async def get_ticket_detail(
-    ticket_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Get detailed sentiment trajectory for a specific ticket
-    """
-    sentiments = (
-        db.query(SentimentResult)
-        .filter(SentimentResult.ticket_id == ticket_id)
-        .order_by(
-            SentimentResult.comment_timestamp.asc().nullslast(),
-            SentimentResult.comment_number.asc().nullslast()
-        )
-        .all()
-    )
-
-    if not sentiments:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-
-    # Build detailed comments
-    comments = []
-    sentiment_scores = {'positive': 0, 'negative': 0, 'neutral': 0}
-
-    for sent in sentiments:
-        comment_data = {
-            "id": sent.id,
-            "field_type": sent.field_type or "unknown",
-            "text": sent.text,
-            "sentiment": sent.sentiment,
-            "confidence": sent.confidence,
-            "comment_timestamp": sent.comment_timestamp.isoformat() if sent.comment_timestamp else None,
-            "comment_number": sent.comment_number,
-            "author_id": sent.author_id,
-            "created_at": sent.created_at.isoformat() if sent.created_at else None
-        }
-        comments.append(comment_data)
-
-        if sent.sentiment in sentiment_scores:
-            sentiment_scores[sent.sentiment] += 1
-
-    # Calculate final sentiment
-    final_sentiment = max(sentiment_scores, key=sentiment_scores.get)
-    total_comments = sum(sentiment_scores.values())
-
-    # Calculate trajectory
-    if len(comments) >= 2:
-        first_sentiment = comments[0]['sentiment']
-        last_sentiment = comments[-1]['sentiment']
-
-        if first_sentiment == 'negative' and last_sentiment == 'positive':
-            status = 'improving'
-        elif first_sentiment == 'positive' and last_sentiment == 'negative':
-            status = 'declining'
-        elif first_sentiment == last_sentiment:
-            status = f'stable_{first_sentiment}'
-        else:
-            status = 'mixed'
-    else:
-        status = f'single_{comments[0]["sentiment"]}' if comments else 'unknown'
-
-    return {
-        "ticket_id": ticket_id,
-        "total_comments": total_comments,
-        "sentiment_distribution": sentiment_scores,
-        "final_sentiment": final_sentiment,
-        "status": status,
-        "comments": comments,
-        "first_comment_date": comments[0]['comment_timestamp'] if comments else None,
-        "last_comment_date": comments[-1]['comment_timestamp'] if comments else None
-    }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving ticket details: {str(e)}")

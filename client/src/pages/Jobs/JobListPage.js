@@ -45,11 +45,12 @@ function JobListPage() {
     const fetchJobs = async () => {
       setLoading(true);
       try {
+        const apiUrl = process.env.REACT_APP_API_URL || '';
         const params = new URLSearchParams();
         if (statusFilter) {
           params.append('status', statusFilter);
         }
-        const response = await fetch(`/api/jobs?${params.toString()}`);
+        const response = await fetch(`${apiUrl}/api/jobs?${params.toString()}`);
         if (!response.ok) {
           throw new Error('Failed to load jobs');
         }

@@ -9,7 +9,7 @@ celery_app = Celery(
     'sentiment_platform',
     broker=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
     backend=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
-    include=['backend.jobs.ingest_job']
+    include=['jobs.ingest_job', 'jobs.parquet_ingest_job', 'jobs.reporting_tasks']
 )
 
 # Optional configuration

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 from typing import Dict, List, Optional, Any
 
-from ..cache import cache
+from cache import cache
 
 JOB_KEY_PREFIX = "ingest_job"
 JOB_INDEX_KEY = "ingest_job:index"

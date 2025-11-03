@@ -7,10 +7,10 @@ from sqlalchemy import func, cast, Date, case, text
 import json
 import httpx
 import logging
-from ..database import get_db
-from ..models.sentiment_result import SentimentResult
-from ..services.elasticsearch_client import es_client
-from ..config import settings
+from database import get_db
+from storage.storage_manager import StorageManager
+from services.elasticsearch_client import es_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -151,7 +151,7 @@ SQL Query:"""
     return prompt
 
 @router.post("/support/nlq")
-async def process_nlq(request: NLQRequest, db: Session = Depends(get_db)):
+async def process_nlq(request: NLQRequest):
     """
     Process natural language query about support data using Ollama LLM with RAG.
     Uses Elasticsearch to retrieve relevant tickets as context.
@@ -164,21 +164,20 @@ async def process_nlq(request: NLQRequest, db: Session = Depends(get_db)):
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
 
-        # Get aggregate statistics
-        sentiment_dist = (
-            db.query(
-                SentimentResult.sentiment,
-                func.count(SentimentResult.id).label("count")
-            )
-            .filter(SentimentResult.comment_timestamp >= start)
-            .filter(SentimentResult.comment_timestamp <= end + timedelta(days=1))
-            .group_by(SentimentResult.sentiment)
-            .all()
-        )
-
+        # Get aggregate statistics using DuckDB
+        storage = StorageManager()
+        sentiment_sql = f"""
+        SELECT sentiment, COUNT(*) as count
+        FROM sentiment_data 
+        WHERE timestamp >= '{start_date}' AND timestamp <= '{end_date}'
+        GROUP BY sentiment
+        """
+        
+        sentiment_df = storage.execute_query(sentiment_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        
         sentiment_data = {"positive": 0, "negative": 0, "neutral": 0}
-        for sentiment, count in sentiment_dist:
-            sentiment_data[sentiment] = count
+        for _, row in sentiment_df.iterrows():
+            sentiment_data[row['sentiment']] = int(row['count'])
 
         total = sum(sentiment_data.values())
 
@@ -232,26 +231,26 @@ Answer:"""
         if any(keyword in request.query.lower() for keyword in visualization_keywords):
             # Create appropriate chart based on query
             if 'trend' in request.query.lower() or 'over time' in request.query.lower():
-                # Get trend data
-                trend = (
-                    db.query(
-                        cast(SentimentResult.comment_timestamp, Date).label("date"),
-                        SentimentResult.sentiment,
-                        func.count(SentimentResult.id).label("count")
-                    )
-                    .filter(SentimentResult.comment_timestamp >= start)
-                    .filter(SentimentResult.comment_timestamp <= end + timedelta(days=1))
-                    .group_by("date", SentimentResult.sentiment)
-                    .order_by("date")
-                    .all()
-                )
-
+                # Get trend data using DuckDB
+                trend_sql = f"""
+                SELECT 
+                    DATE(timestamp) as date,
+                    sentiment,
+                    COUNT(*) as count
+                FROM sentiment_data 
+                WHERE timestamp >= '{start_date}' AND timestamp <= '{end_date}'
+                GROUP BY DATE(timestamp), sentiment
+                ORDER BY date
+                """
+                
+                trend_df = storage.execute_query(trend_sql, {'sentiment_data': 'sentiment/data.parquet'})
+                
                 trend_map = {}
-                for date, sentiment, count in trend:
-                    date_str = date.isoformat()
+                for _, row in trend_df.iterrows():
+                    date_str = str(row['date'])
                     if date_str not in trend_map:
                         trend_map[date_str] = {"date": date_str, "positive": 0, "negative": 0, "neutral": 0}
-                    trend_map[date_str][sentiment] = count
+                    trend_map[date_str][row['sentiment']] = int(row['count'])
 
                 trend_data = list(trend_map.values())
 

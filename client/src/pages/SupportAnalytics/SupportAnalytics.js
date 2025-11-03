@@ -16,6 +16,8 @@ import {
   IconButton,
   CircularProgress,
   Paper,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
@@ -25,8 +27,15 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import SendIcon from '@mui/icons-material/Send';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import ChatIcon from '@mui/icons-material/Chat';
+import LogoutIcon from '@mui/icons-material/Logout';
+import AnalyticsIcon from '@mui/icons-material/Analytics';
+import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import { enqueueSnackbar } from 'notistack';
-import { Link as RouterLink } from 'react-router-dom';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
+import SentimentHeatmap from '../../components/Analytics/SentimentHeatmap';
+import EntityWordCloud from '../../components/Analytics/EntityWordCloud';
+import CorrelationMatrix from '../../components/Analytics/CorrelationMatrix';
+import AnomalyAlerts from '../../components/Analytics/AnomalyAlerts';
 
 function TabPanel({ children, value, index, ...other }) {
   return (
@@ -48,25 +57,64 @@ function SupportAnalytics() {
   const [endDate, setEndDate] = useState(new Date());
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
   // NLQ state
   const [nlqQuery, setNlqQuery] = useState('');
   const [nlqResponse, setNlqResponse] = useState(null);
   const [nlqLoading, setNlqLoading] = useState(false);
 
+  // Advanced analytics state
+  const [heatmapData, setHeatmapData] = useState([]);
+  const [entityData, setEntityData] = useState([]);
+  const [correlationData, setCorrelationData] = useState({ correlations: [], features: [] });
+  const [anomalyData, setAnomalyData] = useState([]);
+
   const fetchAnalytics = useCallback(async () => {
     setLoading(true);
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const params = new URLSearchParams({
         start_date: startDate.toISOString().split('T')[0],
         end_date: endDate.toISOString().split('T')[0],
       });
 
-      const response = await fetch(`/api/support/analytics?${params.toString()}`);
+      // Fetch basic analytics
+      const response = await fetch(`${apiUrl}/api/support/analytics?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to fetch analytics');
-
       const data = await response.json();
       setAnalytics(data);
+
+      // Fetch advanced analytics
+      const [heatmapRes, entityRes, correlationRes, anomalyRes] = await Promise.all([
+        fetch(`${apiUrl}/api/analytics/heatmap`),
+        fetch(`${apiUrl}/api/analytics/entities`),
+        fetch(`${apiUrl}/api/analytics/correlations`),
+        fetch(`${apiUrl}/api/analytics/anomalies`)
+      ]);
+
+      if (heatmapRes.ok) {
+        const heatmapData = await heatmapRes.json();
+        setHeatmapData(heatmapData.data || []);
+      }
+
+      if (entityRes.ok) {
+        const entityData = await entityRes.json();
+        setEntityData(entityData.entities || []);
+      }
+
+      if (correlationRes.ok) {
+        const correlationData = await correlationRes.json();
+        setCorrelationData(correlationData);
+      }
+
+      if (anomalyRes.ok) {
+        const anomalyData = await anomalyRes.json();
+        setAnomalyData(anomalyData.anomalies || []);
+      }
+
     } catch (error) {
       enqueueSnackbar('Failed to fetch analytics data', { variant: 'error' });
       setAnalytics(null);
@@ -83,12 +131,19 @@ function SupportAnalytics() {
     setTabValue(newValue);
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    enqueueSnackbar('Logged out successfully', { variant: 'info' });
+    navigate('/login');
+  };
+
   const handleNLQSubmit = async () => {
     if (!nlqQuery.trim()) return;
 
     setNlqLoading(true);
     try {
-      const response = await fetch('/api/support/nlq', {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
+      const response = await fetch(`${apiUrl}/api/support/nlq`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -124,11 +179,50 @@ function SupportAnalytics() {
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
           <Typography variant="h4" component="h1">
-            Support Analytics
+            Ticket Analytics Dashboard
           </Typography>
-          <Button component={RouterLink} to="/" variant="outlined">
-            Back to Dashboard
-          </Button>
+          <Stack direction="row" spacing={2}>
+            <Button
+              component={RouterLink}
+              to="/upload"
+              variant="outlined"
+              startIcon={<AnalyticsIcon />}
+            >
+              Upload Data
+            </Button>
+            <Button
+              component={RouterLink}
+              to="/sentiment-analysis"
+              variant="outlined"
+              startIcon={<AnalyticsIcon />}
+            >
+              Sentiment Deep Dive
+            </Button>
+            <Button
+              component={RouterLink}
+              to="/ticket-trajectory"
+              variant="outlined"
+              startIcon={<AnalyticsIcon />}
+            >
+              Ticket Trajectory
+            </Button>
+            <Button
+              component={RouterLink}
+              to="/jobs"
+              variant="outlined"
+              startIcon={<AnalyticsIcon />}
+            >
+              Job Status
+            </Button>
+            <Button
+              onClick={handleLogout}
+              variant="outlined"
+              color="error"
+              startIcon={<LogoutIcon />}
+            >
+              Logout
+            </Button>
+          </Stack>
         </Stack>
 
         {/* Date Filters */}
@@ -162,6 +256,7 @@ function SupportAnalytics() {
         <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
           <Tabs value={tabValue} onChange={handleTabChange}>
             <Tab icon={<DashboardIcon />} label="Pre-built Dashboards" iconPosition="start" />
+            <Tab icon={<TrendingUpIcon />} label="Advanced Analytics" iconPosition="start" />
             <Tab icon={<ChatIcon />} label="Natural Language Query (NLQ)" iconPosition="start" />
           </Tabs>
         </Box>
@@ -216,7 +311,7 @@ function SupportAnalytics() {
                           hoverinfo: 'label+value+percent'
                         }]}
                         layout={{
-                          height: 350,
+                          height: isMobile ? 250 : 350,
                           margin: { t: 20, b: 20, l: 20, r: 20 },
                           showlegend: true,
                           legend: { orientation: 'h', y: -0.1 }
@@ -436,8 +531,51 @@ function SupportAnalytics() {
           )}
         </TabPanel>
 
-        {/* Tab 2: Natural Language Query */}
+        {/* Tab 2: Advanced Analytics */}
         <TabPanel value={tabValue} index={1}>
+          <Grid container spacing={3}>
+            {/* Anomaly Alerts */}
+            <Grid item xs={12}>
+              <AnomalyAlerts 
+                anomalies={anomalyData}
+                onAlertClick={(alert) => {
+                  enqueueSnackbar(`Investigating ${alert.type} on ${alert.date}`, { variant: 'info' });
+                }}
+              />
+            </Grid>
+            
+            {/* Sentiment Heatmap */}
+            <Grid item xs={12} lg={8}>
+              <SentimentHeatmap 
+                data={heatmapData}
+                onCellClick={(x, y, data) => {
+                  enqueueSnackbar(`Drilling down: ${x} - ${y}`, { variant: 'info' });
+                }}
+              />
+            </Grid>
+            
+            {/* Entity Word Cloud */}
+            <Grid item xs={12} lg={4}>
+              <EntityWordCloud 
+                entities={entityData}
+                onEntityClick={(entity) => {
+                  enqueueSnackbar(`Filtering by entity: ${entity.text}`, { variant: 'info' });
+                }}
+              />
+            </Grid>
+            
+            {/* Correlation Matrix */}
+            <Grid item xs={12}>
+              <CorrelationMatrix 
+                correlations={correlationData.correlations}
+                features={correlationData.features}
+              />
+            </Grid>
+          </Grid>
+        </TabPanel>
+
+        {/* Tab 3: Natural Language Query */}
+        <TabPanel value={tabValue} index={2}>
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>

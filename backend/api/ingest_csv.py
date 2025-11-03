@@ -7,15 +7,15 @@ import uuid
 import logging
 from typing import Dict, Any, Optional, List
 
-from ..jobs.ingest_job import process_csv_upload
-from ..jobs.celery_config import celery_app
-from ..jobs.job_status import (
+from jobs.parquet_ingest_job import process_csv_content_parquet_task, process_json_ingest_parquet_task
+from jobs.celery_config import celery_app
+from jobs.job_status import (
     init_job,
     get_job,
     list_jobs,
     mark_job_failed,
 )
-from ..config import settings
+from config import settings
 from .auth import require_role
 
 logger = logging.getLogger(__name__)
@@ -140,28 +140,20 @@ async def upload_csv(
         logger.error(f"Error reading file content: {e}")
         raise HTTPException(status_code=400, detail="Failed to read file content")
 
-    # Save file temporarily
-    file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.csv")
-    try:
-        with open(file_path, "wb") as buffer:
-            for chunk in content_chunks:
-                buffer.write(chunk)
-
-        logger.info(f"File saved temporarily: {file_path} ({file_size} bytes)")
-
-    except Exception as e:
-        logger.error(f"Failed to save file: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+    # Store file content in memory for processing
+    file_content = b''.join(content_chunks)
+    logger.info(f"File loaded into memory: {file.filename} ({file_size} bytes)")
 
     # Validate CSV structure
     try:
+        import io
         # Try to read with different encodings if needed
         df = None
         encodings_to_try = ['utf-8', 'latin1', 'cp1252']
 
         for encoding in encodings_to_try:
             try:
-                df = pd.read_csv(file_path, nrows=10, encoding=encoding)  # Read first 10 rows for validation
+                df = pd.read_csv(io.BytesIO(file_content), nrows=10, encoding=encoding)  # Read first 10 rows for validation
                 break
             except UnicodeDecodeError:
                 continue
@@ -170,7 +162,6 @@ async def upload_csv(
             raise Exception("Unable to decode CSV file with supported encodings")
 
         if df.empty:
-            os.remove(file_path)
             logger.warning("Uploaded CSV file is empty")
             raise HTTPException(status_code=400, detail="CSV file is empty")
 
@@ -179,7 +170,6 @@ async def upload_csv(
                         ['text', 'description', 'summary', 'comment', 'feedback', 'message', 'content'])]
 
         if not text_columns:
-            os.remove(file_path)
             logger.warning(f"No text columns found in CSV. Columns: {list(df.columns)}")
             raise HTTPException(
                 status_code=400,
@@ -189,16 +179,12 @@ async def upload_csv(
         logger.info(f"CSV validation successful. Found {len(df)} rows and {len(df.columns)} columns. Text columns: {text_columns}")
 
     except pd.errors.EmptyDataError:
-        os.remove(file_path)
         logger.warning("CSV file appears to be empty or malformed")
         raise HTTPException(status_code=400, detail="CSV file is empty or malformed")
     except pd.errors.ParserError as e:
-        os.remove(file_path)
         logger.warning(f"CSV parsing error: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
     except Exception as e:
-        if os.path.exists(file_path):
-            os.remove(file_path)
         logger.error(f"Unexpected error during CSV validation: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
 
@@ -218,13 +204,13 @@ async def upload_csv(
     )
 
     try:
-        # Dispatch async Celery task for processing
+        # Process using new Parquet pipeline
         celery_app.send_task(
-            "backend.jobs.ingest_job.process_csv_upload_task",
-            args=[file_path, job_id]
+            "backend.jobs.parquet_ingest_job.process_csv_content_parquet_task",
+            args=[file_content.decode('utf-8'), job_id, file.filename]
         )
 
-        logger.info(f"Successfully queued job {job_id} for async processing")
+        logger.info(f"Successfully queued Parquet job {job_id} for async processing")
         return JSONResponse({
             "job_id": job_id,
             "status_url": f"/api/job/{job_id}",
@@ -239,8 +225,6 @@ async def upload_csv(
         })
 
     except Exception as e:
-        if os.path.exists(file_path):
-            os.remove(file_path)
         logger.error(f"Failed to queue job {job_id}: {e}")
         mark_job_failed(job_id, str(e))
         raise HTTPException(status_code=500, detail=f"Failed to queue processing: {str(e)}")
@@ -275,9 +259,9 @@ async def ingest_data(payload: IngestRequest):
         # Convert Pydantic models to dicts for Celery serialization
         records_data = [record.model_dump() for record in payload.records]
 
-        # Dispatch async Celery task
+        # Dispatch async Celery task using Parquet pipeline
         celery_app.send_task(
-            "backend.jobs.ingest_job.process_json_ingest_task",
+            "backend.jobs.parquet_ingest_job.process_json_ingest_parquet_task",
             args=[job_id, records_data]
         )
 

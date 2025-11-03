@@ -1,12 +1,8 @@
-from fastapi import APIRouter, Query, Depends
+from fastapi import APIRouter, Query
 from typing import Optional
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
-from ..database import get_db
-from ..models.sentiment_result import SentimentResult
-from ..models.entity import Entity
-from ..services.elasticsearch_client import es_client
+from storage.storage_manager import StorageManager
+from services.elasticsearch_client import es_client
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,32 +15,19 @@ async def search_tickets(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(20, description="Number of results to return"),
-    offset: int = Query(0, description="Number of results to skip"),
-    db: Session = Depends(get_db)
+    offset: int = Query(0, description="Number of results to skip")
 ):
     """
-    Search tickets with filters.
-    Uses Elasticsearch when available, falls back to PostgreSQL.
+    Search tickets with filters using DuckDB on Parquet data.
+    Uses Elasticsearch when available, falls back to DuckDB.
     """
-    # Parse dates
-    start = None
-    end = None
-    if start_date:
-        try:
-            start = datetime.strptime(start_date, "%Y-%m-%d")
-        except ValueError:
-            pass
-
-    if end_date:
-        try:
-            end = datetime.strptime(end_date, "%Y-%m-%d")
-        except ValueError:
-            pass
-
     # Try Elasticsearch first
     if es_client.enabled:
         logger.info(f"Using Elasticsearch for search: q={q}, sentiment={sentiment}")
         try:
+            start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+            end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+            
             es_results = es_client.search_tickets(
                 query=q,
                 sentiment=sentiment,
@@ -74,96 +57,91 @@ async def search_tickets(
                 "source": "elasticsearch"
             }
         except Exception as e:
-            logger.warning(f"Elasticsearch search failed, falling back to PostgreSQL: {e}")
+            logger.warning(f"Elasticsearch search failed, falling back to DuckDB: {e}")
 
-    # Fallback to PostgreSQL
-    logger.info("Using PostgreSQL for search (Elasticsearch not available)")
-    query = db.query(SentimentResult)
+    # Fallback to DuckDB on Parquet
+    logger.info("Using DuckDB for search (Elasticsearch not available)")
+    storage = StorageManager()
+    
+    try:
+        # Build WHERE clause
+        where_conditions = []
+        if q:
+            where_conditions.append(f"(text ILIKE '%{q}%' OR ticket_id ILIKE '%{q}%')")
+        if sentiment:
+            where_conditions.append(f"sentiment = '{sentiment}'")
+        if start_date:
+            where_conditions.append(f"timestamp >= '{start_date}'")
+        if end_date:
+            where_conditions.append(f"timestamp <= '{end_date}'")
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        # Count total results
+        count_sql = f"SELECT COUNT(*) as total FROM sentiment_data WHERE {where_clause}"
+        count_df = storage.execute_query(count_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        total = int(count_df.iloc[0]['total']) if not count_df.empty else 0
+        
+        # Get paginated results
+        search_sql = f"""
+        SELECT ticket_id, text, sentiment, confidence, timestamp, field_type
+        FROM sentiment_data 
+        WHERE {where_clause}
+        ORDER BY timestamp DESC
+        LIMIT {limit} OFFSET {offset}
+        """
+        
+        results_df = storage.execute_query(search_sql, {'sentiment_data': 'sentiment/data.parquet'})
+        
+        formatted_results = [
+            {
+                "id": row['ticket_id'],
+                "text": row['text'][:200] + "..." if len(str(row['text'])) > 200 else str(row['text']),
+                "sentiment": row['sentiment'],
+                "confidence": float(row['confidence']),
+                "comment_timestamp": str(row['timestamp']),
+                "field_type": row['field_type']
+            }
+            for _, row in results_df.iterrows()
+        ]
 
-    # Apply text search filter
-    if q:
-        query = query.filter(
-            or_(
-                SentimentResult.text.ilike(f"%{q}%"),
-                SentimentResult.ticket_id.ilike(f"%{q}%")
-            )
-        )
-
-    # Apply sentiment filter
-    if sentiment:
-        query = query.filter(SentimentResult.sentiment == sentiment)
-
-    # Apply date range filter
-    if start:
-        query = query.filter(SentimentResult.comment_timestamp >= start)
-
-    if end:
-        query = query.filter(SentimentResult.comment_timestamp <= end + timedelta(days=1))
-
-    # Get total count before pagination
-    total = query.count()
-
-    # Apply pagination and ordering
-    results = (
-        query.order_by(SentimentResult.comment_timestamp.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-    # Format results
-    formatted_results = [
-        {
-            "id": result.ticket_id,
-            "text": result.text[:200] + "..." if len(result.text) > 200 else result.text,
-            "sentiment": result.sentiment,
-            "confidence": result.confidence,
-            "comment_timestamp": result.comment_timestamp.isoformat() if result.comment_timestamp else None,
-            "field_type": result.field_type,
-            "author_id": result.author_id
+        return {
+            "total": total,
+            "results": formatted_results,
+            "offset": offset,
+            "limit": limit,
+            "source": "duckdb"
         }
-        for result in results
-    ]
-
-    return {
-        "total": total,
-        "results": formatted_results,
-        "offset": offset,
-        "limit": limit,
-        "source": "postgresql"
-    }
+        
+    except Exception as e:
+        logger.error(f"DuckDB search failed: {e}")
+        return {
+            "total": 0,
+            "results": [],
+            "offset": offset,
+            "limit": limit,
+            "source": "duckdb",
+            "error": str(e)
+        }
 
 
 @router.get("/entities/top")
 async def get_top_entities(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(20, le=100, description="Max number of entities to return"),
-    db: Session = Depends(get_db)
+    limit: int = Query(20, le=100, description="Max number of entities to return")
 ):
     """
-    Get top entities from tickets.
-    Uses Elasticsearch aggregations when available, falls back to PostgreSQL.
+    Get top entities from tickets using DuckDB on Parquet data.
+    Uses Elasticsearch aggregations when available, falls back to DuckDB.
     """
-    # Parse dates
-    start = None
-    end = None
-    if start_date:
-        try:
-            start = datetime.strptime(start_date, "%Y-%m-%d")
-        except ValueError:
-            pass
-
-    if end_date:
-        try:
-            end = datetime.strptime(end_date, "%Y-%m-%d")
-        except ValueError:
-            pass
-
     # Try Elasticsearch first
     if es_client.enabled:
         logger.info("Using Elasticsearch for entity aggregation")
         try:
+            start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+            end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+            
             entities = es_client.aggregate_entities(
                 start_date=start,
                 end_date=end,
@@ -175,46 +153,57 @@ async def get_top_entities(
                 "source": "elasticsearch"
             }
         except Exception as e:
-            logger.warning(f"Elasticsearch aggregation failed, falling back to PostgreSQL: {e}")
+            logger.warning(f"Elasticsearch aggregation failed, falling back to DuckDB: {e}")
 
-    # Fallback to PostgreSQL
-    logger.info("Using PostgreSQL for entity aggregation")
-    from ..models.ticket import Ticket
+    # Fallback to DuckDB
+    logger.info("Using DuckDB for entity aggregation")
+    storage = StorageManager()
+    
+    try:
+        # Build WHERE clause for date filtering
+        where_conditions = []
+        if start_date:
+            where_conditions.append(f"ticket_id IN (SELECT ticket_id FROM ticket_data WHERE created_date >= '{start_date}')")
+        if end_date:
+            where_conditions.append(f"ticket_id IN (SELECT ticket_id FROM ticket_data WHERE created_date <= '{end_date}')")
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        entities_sql = f"""
+        SELECT 
+            entity_type as label,
+            entity_text as text,
+            COUNT(*) as count
+        FROM entity_data 
+        WHERE {where_clause}
+        GROUP BY entity_type, entity_text
+        ORDER BY count DESC
+        LIMIT {limit}
+        """
+        
+        entities_df = storage.execute_query(entities_sql, {
+            'entity_data': 'entity/data.parquet',
+            'ticket_data': 'ticket/data.parquet'
+        })
+        
+        entities = [
+            {
+                "label": row['label'],
+                "text": row['text'],
+                "count": int(row['count'])
+            }
+            for _, row in entities_df.iterrows()
+        ]
 
-    query = (
-        db.query(
-            Entity.label,
-            Entity.text,
-            func.count(Entity.id).label("count")
-        )
-        .join(Ticket, Ticket.ticket_id == Entity.ticket_id)
-    )
-
-    # Apply date filters
-    if start:
-        query = query.filter(Ticket.created_at >= start)
-
-    if end:
-        query = query.filter(Ticket.created_at <= end + timedelta(days=1))
-
-    # Group and order
-    results = (
-        query.group_by(Entity.label, Entity.text)
-        .order_by(func.count(Entity.id).desc())
-        .limit(limit)
-        .all()
-    )
-
-    entities = [
-        {
-            "label": label,
-            "text": text,
-            "count": count
+        return {
+            "entities": entities,
+            "source": "duckdb"
         }
-        for label, text, count in results
-    ]
-
-    return {
-        "entities": entities,
-        "source": "postgresql"
-    }
+        
+    except Exception as e:
+        logger.error(f"DuckDB entity aggregation failed: {e}")
+        return {
+            "entities": [],
+            "source": "duckdb",
+            "error": str(e)
+        }

@@ -141,7 +141,7 @@ python -m pytest
 ### Production Setup
 
 1. Update environment variables in `.env` files
-2. Use managed PostgreSQL and Elasticsearch
+2. Use managed **PostgreSQL** and Elasticsearch
 3. Deploy backend to AWS ECS/GKE
 4. Deploy frontend to S3 + CloudFront
 5. Set up CI/CD with GitHub Actions

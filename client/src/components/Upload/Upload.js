@@ -7,20 +7,20 @@ import {
   Box,
   Button,
   LinearProgress,
-  List,
-  ListItem,
-  ListItemText,
   Stack,
   Tabs,
   Tab,
   TextField,
   Alert,
 } from '@mui/material';
-import { useDropzone } from 'react-dropzone';
 import { enqueueSnackbar } from 'notistack';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import DataObjectIcon from '@mui/icons-material/DataObject';
 import { useNavigate, Link as RouterLink } from 'react-router-dom';
+import DragDropZone from './DragDropZone';
+import UploadConfiguration from './UploadConfiguration';
+import ProgressTracker from './ProgressTracker';
+import RecentUploads from './RecentUploads';
 
 function Upload() {
   const [tabValue, setTabValue] = useState(0);
@@ -29,12 +29,25 @@ function Upload() {
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [jsonInput, setJsonInput] = useState('');
   const [jsonError, setJsonError] = useState('');
+  const [currentJobId, setCurrentJobId] = useState(null);
+  const [uploadConfig, setUploadConfig] = useState({
+    idColumn: 'ticket_id',
+    textColumn: 'description',
+    dateColumn: 'created_date',
+    enableSentiment: true,
+    enableNER: false,
+    backgroundProcessing: true,
+    skipDuplicates: false
+  });
+  const [dragError, setDragError] = useState(null);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
   const navigate = useNavigate();
 
   const checkJobStatus = useCallback(async (jobId) => {
     const checkStatus = async () => {
       try {
-        const response = await fetch(`/api/job/${jobId}`);
+        const apiUrl = process.env.REACT_APP_API_URL || '';
+        const response = await fetch(`${apiUrl}/api/job/${jobId}`);
         const status = await response.json();
 
         setUploadedFiles(prev => prev.map(file => {
@@ -71,15 +84,18 @@ function Upload() {
     const file = acceptedFiles[0];
     if (!file) return;
 
+    setDragError(null);
+    setUploadSuccess(false);
+
     // Validate file type
     if (!file.name.endsWith('.csv')) {
-      enqueueSnackbar('Please upload a CSV file', { variant: 'error' });
+      setDragError('Please upload a CSV file');
       return;
     }
 
     // Validate file size (500MB limit)
     if (file.size > 500 * 1024 * 1024) {
-      enqueueSnackbar('File size must be less than 500MB', { variant: 'error' });
+      setDragError('File size must be less than 500MB');
       return;
     }
 
@@ -87,10 +103,14 @@ function Upload() {
     setUploadProgress(0);
 
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const formData = new FormData();
       formData.append('file', file);
+      
+      // Add configuration
+      formData.append('config', JSON.stringify(uploadConfig));
 
-      const response = await fetch('/api/upload', {
+      const response = await fetch(`${apiUrl}/api/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -100,19 +120,11 @@ function Upload() {
       }
 
       const result = await response.json();
+      setCurrentJobId(result.job_id);
+      setUploadSuccess(true);
 
-      enqueueSnackbar('File uploaded successfully! Processing...', {
-        variant: 'success',
-        action: () => (
-          <Button
-            color="inherit"
-            size="small"
-            onClick={() => navigate(`/jobs/${result.job_id}`)}
-          >
-            View status
-          </Button>
-        ),
-      });
+      enqueueSnackbar('File uploaded successfully! Processing...', { variant: 'success' });
+      
       setUploadedFiles(prev => [...prev, {
         name: file.name,
         size: file.size,
@@ -128,21 +140,14 @@ function Upload() {
       checkJobStatus(result.job_id);
 
     } catch (error) {
-      enqueueSnackbar('Upload failed: ' + error.message, { variant: 'error' });
+      setDragError('Upload failed: ' + error.message);
     } finally {
       setUploading(false);
       setUploadProgress(100);
     }
-  }, [checkJobStatus, navigate]);
+  }, [checkJobStatus, uploadConfig]);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'text/csv': ['.csv']
-    },
-    multiple: false,
-    disabled: uploading
-  });
+
 
   const handleJsonSubmit = async () => {
     setJsonError('');
@@ -189,8 +194,9 @@ function Upload() {
     setUploadProgress(0);
 
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/data-ingest', {
+      const response = await fetch(`${apiUrl}/api/data-ingest`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -244,13 +250,7 @@ function Upload() {
     }
   };
 
-  const formatFileSize = (bytes) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
+
 
   return (
     <Container maxWidth="md" sx={{ mt: 4, mb: 4 }}>
@@ -275,29 +275,20 @@ function Upload() {
         {/* CSV Upload Tab */}
         {tabValue === 0 && (
           <CardContent>
-          <Box
-            {...getRootProps()}
-            sx={{
-              border: '2px dashed #ccc',
-              borderRadius: 2,
-              p: 4,
-              textAlign: 'center',
-              cursor: uploading ? 'not-allowed' : 'pointer',
-              bgcolor: isDragActive ? '#f5f5f5' : 'transparent',
-              '&:hover': {
-                bgcolor: '#f5f5f5'
-              }
-            }}
-          >
-            <input {...getInputProps()} />
-            <CloudUploadIcon sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              {isDragActive ? 'Drop the CSV file here' : 'Drag & drop a CSV file here, or click to select'}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Supports CSV files up to 500MB
-            </Typography>
-          </Box>
+            <DragDropZone
+              onFileDrop={onDrop}
+              acceptedTypes={['.csv']}
+              maxSize={500 * 1024 * 1024}
+              disabled={uploading}
+              error={dragError}
+              success={uploadSuccess}
+            />
+
+            <UploadConfiguration
+              config={uploadConfig}
+              onChange={setUploadConfig}
+              availableColumns={['ticket_id', 'summary', 'description', 'created_date', 'priority', 'status', 'department']}
+            />
 
             {uploading && tabValue === 0 && (
               <Box sx={{ mt: 2 }}>
@@ -306,6 +297,20 @@ function Upload() {
                   Uploading... {uploadProgress}%
                 </Typography>
               </Box>
+            )}
+
+            {currentJobId && (
+              <ProgressTracker
+                jobId={currentJobId}
+                onComplete={(status) => {
+                  if (status.status === 'completed') {
+                    enqueueSnackbar('Processing completed successfully!', { variant: 'success' });
+                  } else if (status.status === 'failed') {
+                    enqueueSnackbar('Processing failed', { variant: 'error' });
+                  }
+                  setCurrentJobId(null);
+                }}
+              />
             )}
           </CardContent>
         )}
@@ -369,53 +374,7 @@ function Upload() {
         )}
       </Card>
 
-      {uploadedFiles.length > 0 && (
-        <Card>
-          <CardContent>
-            <Typography variant="h6" component="h2" gutterBottom>
-              Upload History
-            </Typography>
-            <List>
-              {uploadedFiles.map((file, index) => (
-                <ListItem
-                  key={file.jobId ?? index}
-                  divider
-                  secondaryAction={
-                    <Button
-                      component={RouterLink}
-                      to={`/jobs/${file.jobId}`}
-                      size="small"
-                    >
-                      View
-                    </Button>
-                  }
-                >
-                  <ListItemText
-                    primary={file.name}
-                    secondary={
-                      <Stack spacing={0.5}>
-                        <Typography variant="body2" color="text.secondary">
-                          Size: {formatFileSize(file.size)} | Status: {file.status}
-                        </Typography>
-                        {file.totalRows ? (
-                          <Typography variant="caption" color="text.secondary">
-                            Progress: {file.recordsProcessed?.toLocaleString() ?? 0} / {file.totalRows.toLocaleString()}
-                          </Typography>
-                        ) : null}
-                        {file.error && (
-                          <Typography variant="caption" color="error">
-                            {file.error}
-                          </Typography>
-                        )}
-                      </Stack>
-                    }
-                  />
-                </ListItem>
-              ))}
-            </List>
-          </CardContent>
-        </Card>
-      )}
+      <RecentUploads uploads={uploadedFiles} />
     </Container>
   );
 }

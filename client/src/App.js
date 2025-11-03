@@ -1,7 +1,6 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Container } from '@mui/material';
-import Dashboard from './components/Dashboard/Dashboard';
 import Upload from './components/Upload/Upload';
 import Login from './pages/Login/Login';
 import ReportExport from './components/ReportExport/ReportExport';
@@ -22,7 +21,7 @@ function App() {
     <Container maxWidth="lg">
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
+        <Route path="/" element={<Navigate to="/support-analytics" replace />} />
         <Route path="/upload" element={<PrivateRoute><Upload /></PrivateRoute>} />
         <Route path="/reports" element={<PrivateRoute><ReportExport /></PrivateRoute>} />
         <Route path="/sentiment-analysis" element={<PrivateRoute><SentimentAnalysis /></PrivateRoute>} />

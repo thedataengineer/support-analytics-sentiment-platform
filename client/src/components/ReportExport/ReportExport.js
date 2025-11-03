@@ -15,10 +15,11 @@ function ReportExport() {
     setGenerating(true);
 
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const startDateStr = startDate.toISOString().split('T')[0];
       const endDateStr = endDate.toISOString().split('T')[0];
 
-      const response = await fetch(`/api/report/pdf?start_date=${startDateStr}&end_date=${endDateStr}`);
+      const response = await fetch(`${apiUrl}/api/report/pdf?start_date=${startDateStr}&end_date=${endDateStr}`);
 
       if (!response.ok) {
         throw new Error('Failed to generate report');

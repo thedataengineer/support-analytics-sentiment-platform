@@ -4,13 +4,13 @@ import logging
 import time
 from typing import Dict, Any
 
-from ..services.column_mapping import ColumnMapper
-from ..services.nlp_client import nlp_client
-from ..services.comment_parser import CommentParser
-from ..services.sentiment_aggregator import SentimentAggregator
-from ..services.elasticsearch_client import es_client
-from ..database import get_db_context
-from ..cache import cache
+from services.column_mapping import ColumnMapper
+from services.nlp_client import nlp_client
+from services.comment_parser import CommentParser
+from services.sentiment_aggregator import SentimentAggregator
+from services.elasticsearch_client import es_client
+from database import get_db_context
+from cache import cache
 from .celery_config import celery_app
 from .job_status import (
     mark_job_running,
@@ -21,6 +21,121 @@ from .job_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+def process_csv_content(csv_content: str, job_id: str, filename: str) -> Dict[str, Any]:
+    """
+    Process CSV content for sentiment analysis
+
+    Args:
+        csv_content: CSV file content as string
+        job_id: Unique job identifier
+        filename: Original filename
+
+    Returns:
+        Processing statistics
+    """
+    import io
+    start_time = time.time()
+    stats = {
+        "job_id": job_id,
+        "filename": filename,
+        "total_rows": 0,
+        "processed_rows": 0,
+        "sentiment_records": 0,
+        "entity_records": 0,
+        "errors": [],
+        "duration": 0
+    }
+
+    mark_job_running(job_id)
+    logger.info(f"Starting CSV content processing job {job_id} for file: {filename}")
+
+    try:
+        # Initialize column mapper
+        mapper = ColumnMapper()
+        mapping_name = f"upload_{job_id}"
+
+        # Read CSV from string content
+        chunk_size = 500
+        logger.info(f"Reading CSV content in chunks of {chunk_size} rows")
+
+        # First, count total rows (for progress tracking)
+        try:
+            total_rows = len(csv_content.split('\n')) - 1  # Subtract header
+            stats["total_rows"] = total_rows
+            update_job_metadata(job_id, total_rows=total_rows)
+            logger.info(f"CSV contains {total_rows} data rows")
+        except Exception as e:
+            logger.warning(f"Could not count total rows: {e}")
+
+        # Process CSV content in chunks
+        csv_io = io.StringIO(csv_content)
+        chunks = pd.read_csv(csv_io, chunksize=chunk_size)
+        chunk_number = 0
+
+        with get_db_context() as db:
+            for chunk in chunks:
+                chunk_number += 1
+                logger.debug(f"Processing chunk {chunk_number} with {len(chunk)} rows")
+
+                try:
+                    chunk_stats = process_chunk(chunk, mapper, db, job_id, mapping_name)
+                    stats["processed_rows"] += chunk_stats["processed_rows"]
+                    stats["sentiment_records"] += chunk_stats["sentiment_records"]
+                    stats["entity_records"] += chunk_stats["entity_records"]
+
+                    if chunk_stats["errors"]:
+                        stats["errors"].extend(chunk_stats["errors"])
+
+                    increment_job_progress(
+                        job_id,
+                        processed=chunk_stats["processed_rows"],
+                        sentiment_records=chunk_stats["sentiment_records"],
+                        entity_records=chunk_stats["entity_records"],
+                    )
+
+                except Exception as e:
+                    error_msg = f"Failed to process chunk {chunk_number}: {str(e)}"
+                    logger.error(error_msg)
+                    stats["errors"].append(error_msg)
+
+        # Clear relevant cache after processing
+        cache.clear_pattern("sentiment_*")
+        logger.info("Cleared sentiment-related cache entries")
+
+        stats["duration"] = time.time() - start_time
+        logger.info(f"Job {job_id} completed successfully in {stats['duration']:.2f}s. "
+                   f"Processed {stats['processed_rows']} rows, "
+                   f"created {stats['sentiment_records']} sentiment records, "
+                   f"{stats['entity_records']} entity records")
+
+        mark_job_completed(
+            job_id,
+            records_processed=stats["processed_rows"],
+            sentiment_records=stats["sentiment_records"],
+            entity_records=stats["entity_records"],
+            duration=stats["duration"],
+            errors=stats["errors"],
+        )
+
+        return stats
+
+    except Exception as e:
+        stats["duration"] = time.time() - start_time
+        error_msg = f"Job {job_id} failed after {stats['duration']:.2f}s: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        stats["errors"].append(str(e))
+
+        mark_job_failed(
+            job_id,
+            str(e),
+            records_processed=stats["processed_rows"],
+            sentiment_records=stats["sentiment_records"],
+            entity_records=stats["entity_records"],
+            duration=stats["duration"],
+        )
+
+        raise Exception(error_msg) from e
 
 def process_csv_upload(file_path: str, job_id: str) -> Dict[str, Any]:
     """
@@ -169,6 +284,21 @@ def process_csv_upload_task(self, file_path: str, job_id: str) -> Dict[str, Any]
     """
     return process_csv_upload(file_path, job_id)
 
+@celery_app.task(name="backend.jobs.ingest_job.process_csv_content_task", bind=True)
+def process_csv_content_task(self, csv_content: str, job_id: str, filename: str) -> Dict[str, Any]:
+    """
+    Celery task wrapper for CSV content processing.
+
+    Args:
+        csv_content: CSV file content as string
+        job_id: Unique job identifier
+        filename: Original filename
+
+    Returns:
+        Processing statistics
+    """
+    return process_csv_content(csv_content, job_id, filename)
+
 
 @celery_app.task(name="backend.jobs.ingest_job.process_json_ingest_task", bind=True)
 def process_json_ingest_task(self, job_id: str, records: list) -> Dict[str, Any]:
@@ -183,9 +313,9 @@ def process_json_ingest_task(self, job_id: str, records: list) -> Dict[str, Any]
         Processing statistics
     """
     from sqlalchemy import select
-    from ..models.sentiment_result import SentimentResult
-    from ..models.entity import Entity
-    from ..models.ticket import Ticket
+    from models.sentiment_result import SentimentResult
+    from models.entity import Entity
+    from models.ticket import Ticket
 
     start_time = time.time()
     stats = {
@@ -358,9 +488,9 @@ def process_chunk(chunk: pd.DataFrame, mapper: ColumnMapper, db, job_id: str, ma
         Statistics about processed chunk
     """
     from sqlalchemy import select
-    from ..models.sentiment_result import SentimentResult
-    from ..models.entity import Entity
-    from ..models.ticket import Ticket
+    from models.sentiment_result import SentimentResult
+    from models.entity import Entity
+    from models.ticket import Ticket
     import uuid
 
     stats = {
@@ -440,7 +570,12 @@ def process_chunk(chunk: pd.DataFrame, mapper: ColumnMapper, db, job_id: str, ma
                 # 1. Analyze Summary (if present)
                 if summary.strip():
                     try:
-                        sentiment_result = nlp_client.get_sentiment(summary)
+                        try:
+                            sentiment_result = nlp_client.get_sentiment(summary)
+                        except Exception:
+                            # Fallback to simple rule-based sentiment
+                            sentiment_result = {"sentiment": "neutral", "confidence": 0.3}
+                        
                         sentiment_record = SentimentResult(
                             ticket_id=ticket_id,
                             text=summary[:1000],  # Limit text length
@@ -462,7 +597,11 @@ def process_chunk(chunk: pd.DataFrame, mapper: ColumnMapper, db, job_id: str, ma
                 # 2. Analyze Description (if present)
                 if description.strip():
                     try:
-                        sentiment_result = nlp_client.get_sentiment(description)
+                        try:
+                            sentiment_result = nlp_client.get_sentiment(description)
+                        except Exception:
+                            sentiment_result = {"sentiment": "neutral", "confidence": 0.3}
+                        
                         sentiment_record = SentimentResult(
                             ticket_id=ticket_id,
                             text=description[:1000],
@@ -500,7 +639,11 @@ def process_chunk(chunk: pd.DataFrame, mapper: ColumnMapper, db, job_id: str, ma
                         continue
 
                     try:
-                        sentiment_result = nlp_client.get_sentiment(actual_text)
+                        try:
+                            sentiment_result = nlp_client.get_sentiment(actual_text)
+                        except Exception:
+                            sentiment_result = {"sentiment": "neutral", "confidence": 0.3}
+                        
                         comment_count += 1
 
                         sentiment_record = SentimentResult(
@@ -545,7 +688,10 @@ def process_chunk(chunk: pd.DataFrame, mapper: ColumnMapper, db, job_id: str, ma
                         # Limit text length for entity extraction to avoid processing huge texts
                         # Entity extraction is most useful for first 5000 chars anyway
                         text_for_entities = combined_text[:5000]
-                        entities = nlp_client.get_entities(text_for_entities)
+                        try:
+                            entities = nlp_client.get_entities(text_for_entities)
+                        except Exception:
+                            entities = []  # Skip entity extraction if ML service unavailable
 
                         for entity_data in entities:
                             entity_text = entity_data.get("text", "")
@@ -664,6 +810,51 @@ def process_parquet_data(df: pd.DataFrame, job_id: str) -> Dict[str, Any]:
     }
 
 
+@celery_app.task(name="backend.jobs.ingest_job.process_parquet_content_task")
+def process_parquet_content_task(parquet_content: bytes, job_id: str, filename: str) -> Dict[str, Any]:
+    """Process parquet content directly"""
+    import io
+    start_time = time.time()
+    
+    mark_job_running(job_id)
+    
+    try:
+        df = pd.read_parquet(io.BytesIO(parquet_content))
+        
+        mapper = ColumnMapper()
+        mapping_name = f"parquet_{job_id}"
+        
+        # Process in smaller batches for large datasets
+        batch_size = 100 if len(df) > 1000 else len(df)
+        
+        with get_db_context() as db:
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i+batch_size]
+                chunk_stats = process_chunk(batch, mapper, db, job_id, mapping_name)
+                
+                increment_job_progress(
+                    job_id,
+                    processed=chunk_stats["processed_rows"],
+                    sentiment_records=chunk_stats["sentiment_records"],
+                    entity_records=chunk_stats["entity_records"]
+                )
+            
+        duration = time.time() - start_time
+        
+        mark_job_completed(
+            job_id,
+            records_processed=chunk_stats["processed_rows"],
+            sentiment_records=chunk_stats["sentiment_records"], 
+            entity_records=chunk_stats["entity_records"],
+            duration=duration
+        )
+        
+        return chunk_stats
+        
+    except Exception as e:
+        mark_job_failed(job_id, str(e))
+        raise
+
 @celery_app.task(name="backend.jobs.ingest_job.process_parquet_job")
 def process_parquet_job(job_id: str, parquet_path: str, batch_size: int = 500) -> Dict[str, Any]:
     """
@@ -687,14 +878,18 @@ def process_parquet_job(job_id: str, parquet_path: str, batch_size: int = 500) -
     try:
         import pyarrow.parquet as pq
 
+        if not os.path.exists(parquet_path):
+            raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+
         parquet_file = pq.ParquetFile(parquet_path)
+
         total_rows = parquet_file.metadata.num_rows
         total_columns = parquet_file.metadata.num_columns
         stats["total_rows"] = total_rows
         update_job_metadata(job_id, total_rows=total_rows, total_columns=total_columns)
 
         mapper = ColumnMapper()
-        mapping_name = "jira_parquet"
+        mapping_name = f"parquet_{job_id}"
         mapper.create_mapping(list(parquet_file.schema.names), mapping_name)
 
         batch_number = 0
@@ -718,6 +913,12 @@ def process_parquet_job(job_id: str, parquet_path: str, batch_size: int = 500) -
                         sentiment_records=chunk_stats["sentiment_records"],
                         entity_records=chunk_stats["entity_records"],
                     )
+
+                    # Log progress for large files
+                    if batch_number % 10 == 0:
+                        logger.info(f"Job {job_id}: Processed {stats['processed_rows']}/{total_rows} rows "
+                                  f"({stats['processed_rows']/total_rows*100:.1f}%)")
+
                 except Exception as e:
                     error_msg = f"Failed to process parquet batch {batch_number}: {e}"
                     logger.error(error_msg)

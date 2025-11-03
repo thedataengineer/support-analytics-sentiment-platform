@@ -5,8 +5,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..jobs.ingest_job import process_parquet_job
-from ..jobs.job_status import init_job
+from jobs.ingest_job import process_parquet_job
+from jobs.job_status import init_job
 
 logger = logging.getLogger(__name__)
 

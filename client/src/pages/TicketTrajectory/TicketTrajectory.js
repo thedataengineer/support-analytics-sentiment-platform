@@ -51,6 +51,7 @@ function TicketTrajectory() {
   const fetchTickets = useCallback(async () => {
     setLoading(true);
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const params = new URLSearchParams({
         limit: rowsPerPage,
         offset: page * rowsPerPage,
@@ -61,7 +62,7 @@ function TicketTrajectory() {
       if (startDate) params.append('start_date', startDate.toISOString().split('T')[0]);
       if (endDate) params.append('end_date', endDate.toISOString().split('T')[0]);
 
-      const response = await fetch(`/api/tickets?${params.toString()}`);
+      const response = await fetch(`${apiUrl}/api/tickets?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to fetch tickets');
 
       const data = await response.json();
@@ -150,7 +151,7 @@ function TicketTrajectory() {
           <Typography variant="h4" component="h1">
             Ticket Sentiment Trajectory
           </Typography>
-          <Button component={RouterLink} to="/" variant="outlined">
+          <Button component={RouterLink} to="/support-analytics" variant="outlined">
             Back to Dashboard
           </Button>
         </Stack>

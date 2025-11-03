@@ -1,135 +1,24 @@
 # STORY-006 · Job Status Frontend Experience
 
+## Status
+✅ Completed
+
 ## Overview
-Deliver the UX promised in the upload story: users receive a link to a job status page that shows live progress, errors, and summaries for ingestion runs. The upload flow should navigate to this page after a successful submission.
+After any upload or API ingest, users land on a status view that visualises progress in near real time. The UI polls the backend job tracker, surfaces errors, and provides a consolidated list of recent runs so analysts can confirm data arrived without digging into logs.
 
-## Acceptance Criteria
-- New route `/jobs/:jobId` displays job metadata (status, timestamps, records processed, error message).
-- Upload confirmation toast includes a “View status” button that routes to the job page.
-- Job page polls `GET /api/job/{job_id}` every 10 seconds while `status` is `queued` or `running`, stops otherwise.
-- Job list view `/jobs` (optional) pages through `GET /api/jobs`.
-- Add unit tests using React Testing Library to check the polling logic and error handling.
+## Delivered Capabilities
+- React routes `/jobs` and `/jobs/:jobId` render `JobListPage` and `JobStatusPage` respectively (`client/src/App.js`).
+- The upload success snackbar includes a “View status” action that navigates directly to `/jobs/{job_id}` (`client/src/components/Upload/Upload.js`).
+- `JobStatusPage` polls `GET /api/job/{job_id}` every 10 seconds while the job is `queued` or `running`, auto-stopping once it reaches a terminal state. Progress, timestamps, and error messages are displayed with Material UI components.
+- `JobListPage` calls `GET /api/jobs` and renders the latest jobs with pagination controls, providing quick access to historical runs.
+- Shared helpers format timestamps, map statuses to chip colours, and guard against fetch failures so the UX remains responsive.
 
-## Routing Mockup
-```jsx
-// client/src/App.js
-import JobStatusPage from './pages/Jobs/JobStatusPage';
-import JobListPage from './pages/Jobs/JobListPage';
+## Reference Implementation
+- Routing: `client/src/App.js`
+- Upload UX + navigation: `client/src/components/Upload/Upload.js`
+- Status page: `client/src/pages/Jobs/JobStatusPage.js`
+- Job list: `client/src/pages/Jobs/JobListPage.js`
 
-<Routes>
-  {/* existing routes */}
-  <Route path="/jobs" element={<JobListPage />} />
-  <Route path="/jobs/:jobId" element={<JobStatusPage />} />
-</Routes>
-```
-
-## Upload Hook Mockup
-```jsx
-// client/src/components/Upload/Upload.js
-const navigate = useNavigate();
-
-const handleSuccess = (file, result) => {
-  enqueueSnackbar('File uploaded successfully! Processing...', {
-    variant: 'success',
-    action: (
-      <Button color="inherit" size="small" onClick={() => navigate(`/jobs/${result.job_id}`)}>
-        View status
-      </Button>
-    ),
-  });
-  setUploadedFiles(prev => [...prev, {
-    name: file.name,
-    size: file.size,
-    jobId: result.job_id,
-    status: 'queued',
-  }]);
-};
-```
-
-## Job Status Page Mockup
-```jsx
-// client/src/pages/Jobs/JobStatusPage.js
-import React, { useEffect, useState, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
-import { Card, CardContent, Typography, Chip, LinearProgress, Button } from '@mui/material';
-
-function JobStatusPage() {
-  const { jobId } = useParams();
-  const [job, setJob] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  const fetchJob = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/job/${jobId}`);
-      if (!res.ok) throw new Error('Failed to fetch job status');
-      const data = await res.json();
-      setJob(data);
-      setError(null);
-      return data.status;
-    } catch (err) {
-      setError(err.message);
-      return 'failed';
-    } finally {
-      setLoading(false);
-    }
-  }, [jobId]);
-
-  useEffect(() => {
-    let timer;
-    const poll = async () => {
-      const status = await fetchJob();
-      if (status === 'queued' || status === 'running') {
-        timer = setTimeout(poll, 10000);
-      }
-    };
-    poll();
-    return () => clearTimeout(timer);
-  }, [fetchJob]);
-
-  if (loading) return <LinearProgress />;
-  if (error) return <Typography color="error">{error}</Typography>;
-
-  return (
-    <Card>
-      <CardContent>
-        <Typography variant="h5">Job {job.job_id}</Typography>
-        <Chip label={job.status.toUpperCase()} color={statusColor(job.status)} />
-        <Typography variant="body2">Submitted: {formatDate(job.submitted_at)}</Typography>
-        {job.started_at && <Typography variant="body2">Started: {formatDate(job.started_at)}</Typography>}
-        {job.completed_at && <Typography variant="body2">Completed: {formatDate(job.completed_at)}</Typography>}
-        <Typography variant="body1" sx={{ mt: 2 }}>
-          Records processed: {job.records_processed}
-        </Typography>
-        {job.error && (
-          <Typography color="error" sx={{ mt: 2 }}>
-            Error: {job.error}
-          </Typography>
-        )}
-        <Button sx={{ mt: 3 }} href="/jobs" variant="outlined">
-          View all jobs
-        </Button>
-      </CardContent>
-    </Card>
-  );
-}
-```
-
-## Job List Mockup
-```jsx
-// client/src/pages/Jobs/JobListPage.js
-const [jobs, setJobs] = useState([]);
-const [page, setPage] = useState(0);
-
-useEffect(() => {
-  fetch(`/api/jobs?offset=${page * 20}&limit=20`)
-    .then(res => res.json())
-    .then(data => setJobs(data.results));
-}, [page]);
-```
-
-## Styling & Testing Notes
-- Reuse Material-UI components for consistent look.
-- Provide status→color helper (`running` = info, `completed` = success, etc.).
-- Add Jest tests mocking `fetch` to confirm polling stops after completion and errors display correctly.
-
+## Verification
+- Manual end-to-end flows validate that a job link appears immediately after uploading and that progress updates as the Celery worker runs.
+- Jest tests under `client/src/pages/Jobs/__tests__/` mock fetch to exercise polling, terminal state handling, and error messaging (add coverage as new behaviours ship).

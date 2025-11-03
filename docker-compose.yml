@@ -1,15 +1,4 @@
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: sentiment_db
-      POSTGRES_USER: sentiment_user
-      POSTGRES_PASSWORD: sentiment_pass
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
   elasticsearch:
     image: elasticsearch:8.16.1
     environment:
@@ -28,14 +17,25 @@ services:
     volumes:
       - redis_data:/data
 
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: sentiment_db
+      POSTGRES_USER: sentiment_user
+      POSTGRES_PASSWORD: sentiment_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     image: sentiment-platform-backend
     depends_on:
-      - postgres
       - redis
+      - postgres
     environment:
       DATABASE_URL: postgresql://sentiment_user:sentiment_pass@postgres:5432/sentiment_db
       REDIS_URL: redis://redis:6379/0
@@ -44,16 +44,30 @@ services:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LOG_LEVEL: INFO
       JIRA_PARQUET_PATH: /data/Jira.parquet
+      MAX_UPLOAD_SIZE: 536870912
+      DATA_ROOT: /app/data
+      UPLOAD_DIR: /app/uploads
+      DUCKDB_PATH: /app/data/sentiment_platform.duckdb
     ports:
       - "8000:8000"
     volumes:
       - /Users/karteek/dev/work/accionlabs/jira-profiler/Jira.parquet:/data/Jira.parquet:ro
+      - backend_data:/app/data
+      - backend_uploads:/app/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
 
   celery:
     image: sentiment-platform-backend
     depends_on:
-      - postgres
       - redis
+      - postgres
     environment:
       DATABASE_URL: postgresql://sentiment_user:sentiment_pass@postgres:5432/sentiment_db
       REDIS_URL: redis://redis:6379/0
@@ -62,11 +76,65 @@ services:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LOG_LEVEL: INFO
       JIRA_PARQUET_PATH: /data/Jira.parquet
-    command: celery -A backend.jobs.celery_config worker --loglevel=info
+      DATA_ROOT: /app/data
+      UPLOAD_DIR: /app/uploads
+      DUCKDB_PATH: /app/data/sentiment_platform.duckdb
+    command: celery -A jobs.celery_config worker --loglevel=info --concurrency=2 --pool=prefork
     volumes:
       - /Users/karteek/dev/work/accionlabs/jira-profiler/Jira.parquet:/data/Jira.parquet:ro
+      - backend_data:/app/data
+      - backend_uploads:/app/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+
+  celery-beat:
+    image: sentiment-platform-backend
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://sentiment_user:sentiment_pass@postgres:5432/sentiment_db
+      REDIS_URL: redis://redis:6379/0
+      ML_SERVICE_URL: http://host.docker.internal:5001
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      LOG_LEVEL: INFO
+      DATA_ROOT: /app/data
+      UPLOAD_DIR: /app/uploads
+      DUCKDB_PATH: /app/data/sentiment_platform.duckdb
+      # Email settings for scheduled reports
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      REPORTS_FROM_EMAIL: ${REPORTS_FROM_EMAIL:-}
+      REPORTS_DAILY_HOUR: ${REPORTS_DAILY_HOUR:-8}
+      REPORTS_DAILY_MINUTE: ${REPORTS_DAILY_MINUTE:-0}
+      REPORTS_WEEKLY_DAY_OF_WEEK: ${REPORTS_WEEKLY_DAY_OF_WEEK:-mon}
+      REPORTS_WEEKLY_HOUR: ${REPORTS_WEEKLY_HOUR:-8}
+      REPORTS_WEEKLY_MINUTE: ${REPORTS_WEEKLY_MINUTE:-0}
+    command: celery -A jobs.celery_config beat --loglevel=info
+    volumes:
+      - backend_data:/app/data
+      - backend_uploads:/app/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
 
 volumes:
-  postgres_data:
   elasticsearch_data:
   redis_data:
+  postgres_data:
+  backend_data:
+  backend_uploads:

@@ -47,6 +47,7 @@ function SentimentAnalysis() {
   const fetchResults = useCallback(async () => {
     setLoading(true);
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const params = new URLSearchParams({
         limit: rowsPerPage,
         offset: page * rowsPerPage,
@@ -57,7 +58,7 @@ function SentimentAnalysis() {
       if (startDate) params.append('start_date', startDate.toISOString().split('T')[0]);
       if (endDate) params.append('end_date', endDate.toISOString().split('T')[0]);
 
-      const response = await fetch(`/api/search?${params.toString()}`);
+      const response = await fetch(`${apiUrl}/api/search?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to fetch results');
 
       const data = await response.json();
@@ -74,8 +75,9 @@ function SentimentAnalysis() {
 
   const fetchStats = useCallback(async () => {
     try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
       const response = await fetch(
-        `/api/sentiment/overview?start_date=${startDate.toISOString().split('T')[0]}&end_date=${endDate.toISOString().split('T')[0]}`
+        `${apiUrl}/api/sentiment/overview?start_date=${startDate.toISOString().split('T')[0]}&end_date=${endDate.toISOString().split('T')[0]}`
       );
       if (!response.ok) throw new Error('Failed to fetch stats');
 
@@ -149,7 +151,7 @@ function SentimentAnalysis() {
           <Typography variant="h4" component="h1">
             Sentiment Analysis Deep Dive
           </Typography>
-          <Button component={RouterLink} to="/" variant="outlined">
+          <Button component={RouterLink} to="/support-analytics" variant="outlined">
             Back to Dashboard
           </Button>
         </Stack>

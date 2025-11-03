@@ -9,7 +9,7 @@ from functools import wraps
 import redis
 from redis import Redis
 
-from .config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 

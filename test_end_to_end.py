@@ -1,302 +1,174 @@
 #!/usr/bin/env python3
-"""
-End-to-end test for the Sentiment Analysis Platform MVP
-Tests the complete system with optimizations and error handling.
-"""
+"""End-to-end test for Parquet migration."""
 
+import requests
+import json
+import time
 import sys
 import os
-import json
-import tempfile
-import shutil
-from pathlib import Path
 
-# Add backend to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
+BASE_URL = "http://localhost:8000"
 
-def test_config_loading():
-    """Test configuration loading"""
-    print("Testing configuration loading...")
-
+def test_health():
+    """Test health endpoint."""
     try:
-        from backend.config import settings
-
-        # Test that settings load correctly
-        assert hasattr(settings, 'database_url')
-        assert hasattr(settings, 'redis_url')
-        assert hasattr(settings, 'secret_key')
-        assert settings.max_upload_size > 0
-
-        print("✓ Configuration loads correctly")
+        response = requests.get(f"{BASE_URL}/health", timeout=5)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["storage"] == "parquet"
+        print("✅ Health check passed")
         return True
     except Exception as e:
-        print(f"✗ Configuration loading failed: {e}")
+        print(f"❌ Health check failed: {e}")
         return False
 
-def test_database_connection():
-    """Test database connection"""
-    print("\nTesting database connection...")
-
+def test_auth():
+    """Test authentication."""
     try:
-        from backend.database import check_database_connection, get_db_context
+        # Bootstrap admin user
+        requests.post(f"{BASE_URL}/api/auth/bootstrap", timeout=5)
+        
+        # Login
+        response = requests.post(f"{BASE_URL}/api/auth/login", 
+                               json={"email": "admin@example.com", "password": "password"},
+                               timeout=5)
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        print("✅ Authentication passed")
+        return data["access_token"]
+    except Exception as e:
+        print(f"❌ Authentication failed: {e}")
+        return None
 
-        # Test connection
-        connected = check_database_connection()
-        if not connected:
-            print("⚠ Database not available (expected in test environment)")
-            return True  # Don't fail if DB isn't running
+def test_ingestion(token):
+    """Test CSV ingestion."""
+    try:
+        # Create test CSV
+        csv_content = "ticket_id,summary,description\nTEST-1,Test ticket,Test description\nTEST-2,Another ticket,Another description"
+        
+        files = {'file': ('test.csv', csv_content, 'text/csv')}
+        headers = {'Authorization': f'Bearer {token}'} if token else {}
+        
+        response = requests.post(f"{BASE_URL}/api/upload", files=files, headers=headers, timeout=10)
+        assert response.status_code == 200
+        data = response.json()
+        assert "job_id" in data
+        print("✅ CSV ingestion passed")
+        return data["job_id"]
+    except Exception as e:
+        print(f"❌ CSV ingestion failed: {e}")
+        return None
 
-        # Test context manager
-        with get_db_context() as db:
-            # Simple query to test connection
-            result = db.execute("SELECT 1 as test")
-            assert result.fetchone()[0] == 1
-
-        print("✓ Database connection works")
+def test_analytics():
+    """Test analytics endpoints."""
+    try:
+        # Test sentiment overview
+        response = requests.get(f"{BASE_URL}/api/sentiment/overview", timeout=10)
+        assert response.status_code == 200
+        data = response.json()
+        assert "sentiment_distribution" in data
+        assert "sentiment_trend" in data
+        
+        # Test support analytics
+        response = requests.get(f"{BASE_URL}/api/support/analytics", timeout=10)
+        assert response.status_code == 200
+        data = response.json()
+        assert "summary" in data
+        
+        print("✅ Analytics endpoints passed")
         return True
     except Exception as e:
-        print(f"✗ Database connection failed: {e}")
+        print(f"❌ Analytics failed: {e}")
         return False
 
-def test_cache_system():
-    """Test Redis cache system"""
-    print("\nTesting cache system...")
-
+def test_search():
+    """Test search functionality."""
     try:
-        from backend.cache import cache
-
-        # Test cache operations
-        test_key = "test_key"
-        test_value = {"message": "hello", "number": 42}
-
-        # Test set/get
-        success = cache.set(test_key, test_value, ttl=60)
-        if success:
-            retrieved = cache.get(test_key)
-            assert retrieved == test_value
-            print("✓ Cache set/get works")
-        else:
-            print("⚠ Cache not available (Redis not running)")
-
-        # Test delete
-        cache.delete(test_key)
-
+        response = requests.get(f"{BASE_URL}/api/search?q=test&limit=5", timeout=10)
+        assert response.status_code == 200
+        data = response.json()
+        assert "total" in data
+        assert "results" in data
+        print("✅ Search passed")
         return True
     except Exception as e:
-        print(f"✗ Cache system failed: {e}")
+        print(f"❌ Search failed: {e}")
         return False
 
-def test_column_mapping():
-    """Test column mapping functionality"""
-    print("\nTesting column mapping...")
-
+def test_report_schedule(token: str) -> bool:
+    """Test scheduled report configuration endpoints."""
     try:
-        from backend.services.column_mapping import ColumnMapper
-        import pandas as pd
-
-        # Create test data
-        test_data = {
-            'id': [1, 2, 3],
-            'ticket_id': ['T001', 'T002', 'T003'],
-            'summary': ['Issue 1', 'Issue 2', 'Issue 3'],
-            'description': ['Desc 1', 'Desc 2', 'Desc 3'],
-            'status': ['open', 'closed', 'open']
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        payload = {
+            "schedule_frequency": "daily",
+            "delivery_time": "08:00",
+            "email": "reports@example.com",
         }
-        df = pd.DataFrame(test_data)
+        response = requests.post(
+            f"{BASE_URL}/api/report/schedule",
+            json=payload,
+            headers=headers,
+            timeout=10,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["schedule_frequency"] == "daily"
+        assert data["email"] == "reports@example.com"
 
-        mapper = ColumnMapper()
-        mapping = mapper.create_mapping(list(df.columns), 'test_mapping')
-
-        # Check mapping structure
-        assert 'text_columns' in mapping
-        assert 'id_column' in mapping
-        assert len(mapping['text_columns']) > 0
-
-        # Test mapping application
-        filtered_df = mapper.apply_mapping(df, mapping)
-        assert len(filtered_df) == len(df)
-
-        print("✓ Column mapping works correctly")
+        response = requests.get(
+            f"{BASE_URL}/api/report/schedule",
+            headers=headers,
+            timeout=10,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["schedule_frequency"] == "daily"
+        print("✅ Report schedule endpoints passed")
         return True
     except Exception as e:
-        print(f"✗ Column mapping failed: {e}")
-        return False
-
-def test_csv_processing():
-    """Test CSV processing job"""
-    print("\nTesting CSV processing...")
-
-    try:
-        from backend.jobs.ingest_job import process_csv_upload
-
-        # Create a temporary copy of sample data
-        temp_dir = tempfile.mkdtemp()
-        temp_file = os.path.join(temp_dir, 'test_data.csv')
-        shutil.copy('sample_data.csv', temp_file)
-
-        try:
-            # Process the CSV (will fail without DB, but test the logic)
-            job_id = "test_job_123"
-            stats = process_csv_upload(temp_file, job_id)
-
-            # Check that stats structure is correct
-            assert 'job_id' in stats
-            assert 'processed_rows' in stats
-            assert 'sentiment_records' in stats
-            assert 'entity_records' in stats
-            assert 'duration' in stats
-
-            print("✓ CSV processing logic works")
-            return True
-
-        except Exception as e:
-            # Expected to fail without running services, but check error handling
-            if "CSV file not found" not in str(e):
-                print(f"✓ CSV processing error handling works: {e}")
-                return True
-            else:
-                raise e
-
-        finally:
-            # Clean up
-            shutil.rmtree(temp_dir)
-
-    except Exception as e:
-        print(f"✗ CSV processing test failed: {e}")
-        return False
-
-def test_api_validation():
-    """Test API input validation"""
-    print("\nTesting API validation...")
-
-    try:
-        from backend.api.ingest_csv import validate_csv_content
-        from backend.config import settings
-
-        # Test file size validation
-        max_size = settings.max_upload_size
-        assert max_size > 0
-
-        # Test file extension validation
-        valid_extensions = ['.csv']
-        assert '.csv' in valid_extensions
-
-        print("✓ API validation logic works")
-        return True
-    except Exception as e:
-        print(f"✗ API validation failed: {e}")
-        return False
-
-def test_error_handling():
-    """Test error handling patterns"""
-    print("\nTesting error handling...")
-
-    try:
-        # Test database error handling
-        from backend.database import get_db_context
-
-        try:
-            with get_db_context() as db:
-                # This should work if DB is available
-                pass
-        except Exception:
-            # Expected if DB not running
-            pass
-
-        # Test cache error handling
-        from backend.cache import cache
-
-        # These should not raise exceptions even if Redis is down
-        cache.set("test", "value")
-        cache.get("test")
-        cache.delete("test")
-
-        print("✓ Error handling works correctly")
-        return True
-    except Exception as e:
-        print(f"✗ Error handling failed: {e}")
-        return False
-
-def test_logging():
-    """Test logging configuration"""
-    print("\nTesting logging...")
-
-    try:
-        import logging
-        from backend.config import settings
-
-        # Test logger creation
-        logger = logging.getLogger("test_logger")
-        logger.info("Test log message")
-
-        # Test that log level is set
-        assert settings.log_level in ['DEBUG', 'INFO', 'WARNING', 'ERROR']
-
-        print("✓ Logging configuration works")
-        return True
-    except Exception as e:
-        print(f"✗ Logging test failed: {e}")
+        print(f"❌ Report schedule failed: {e}")
         return False
 
 def main():
-    """Run all end-to-end tests"""
-    print("=" * 70)
-    print("SENTIMENT ANALYSIS PLATFORM - END-TO-END TESTS")
-    print("=" * 70)
-    print("Testing complete system with optimizations and error handling...")
-
-    # Change to project directory
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
+    """Run end-to-end test."""
+    print("🧪 Starting End-to-End Test for Parquet Migration\n")
+    
     tests = [
-        test_config_loading,
-        test_database_connection,
-        test_cache_system,
-        test_column_mapping,
-        test_csv_processing,
-        test_api_validation,
-        test_error_handling,
-        test_logging,
+        ("Health Check", test_health),
+        ("Authentication", test_auth),
+        ("Report Schedule", None),
+        ("Analytics", test_analytics),
+        ("Search", test_search)
     ]
-
-    results = []
-    for test in tests:
-        try:
-            result = test()
-            results.append(result)
-        except Exception as e:
-            print(f"✗ Test {test.__name__} crashed: {e}")
-            results.append(False)
-
-    print("\n" + "=" * 70)
-    print("END-TO-END TEST RESULTS SUMMARY")
-    print("=" * 70)
-
-    passed = sum(results)
-    total = len(results)
-
-    print(f"Passed: {passed}/{total}")
-
-    if passed == total:
-        print("\n🎉 ALL END-TO-END TESTS PASSED!")
-        print("\n✅ Optimizations implemented:")
-        print("  • Database connection pooling")
-        print("  • Redis caching with TTL")
-        print("  • Comprehensive database indexes")
-        print("  • Request/response logging")
-        print("  • Error handling and recovery")
-        print("  • Performance monitoring")
-        print("\n✅ Error handling implemented:")
-        print("  • Global exception handlers")
-        print("  • Structured logging")
-        print("  • Graceful service degradation")
-        print("  • Input validation")
-        print("  • Resource cleanup")
-        print("\n🚀 The Sentiment Analysis Platform MVP is ready for deployment!")
-        return 0
+    
+    passed = 0
+    token = None
+    
+    for name, test_func in tests:
+        print(f"Running {name}...")
+        if name == "Authentication":
+            result = test_func()
+            if result:
+                token = result
+                passed += 1
+        elif name == "Report Schedule":
+            if token and test_report_schedule(token):
+                passed += 1
+        else:
+            if test_func():
+                passed += 1
+    
+    print(f"\n📊 Results: {passed}/{len(tests)} tests passed")
+    
+    if passed == len(tests):
+        print("🎉 All tests passed! Migration successful!")
+        return True
     else:
-        print("\n❌ Some tests failed. Check output above.")
-        return 1
+        print("⚠️ Some tests failed")
+        return False
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = main()
+    sys.exit(0 if success else 1)

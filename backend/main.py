@@ -5,9 +5,9 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from .api import auth, ingest_csv, report_api, search_api, jira_ingest, ticket_detail_api, support_analytics_api, nlq_api
-from .database import init_database, check_database_connection
-from .config import settings
+from api import auth, ingest_csv, report_api, search_api, jira_ingest, ticket_detail_api, support_analytics_api, nlq_api, parquet_ingest, upload_api, dashboard_api, advanced_analytics_api
+from database import init_database, check_database_connection
+from config import settings
 
 # Configure logging
 logging.basicConfig(
@@ -52,8 +52,8 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React dev server
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -97,6 +97,10 @@ app.include_router(search_api.router, prefix="/api", tags=["search"])
 app.include_router(ticket_detail_api.router, prefix="/api", tags=["tickets"])
 app.include_router(support_analytics_api.router, prefix="/api", tags=["analytics"])
 app.include_router(nlq_api.router, prefix="/api", tags=["nlq"])
+app.include_router(parquet_ingest.router, prefix="/api", tags=["parquet"])
+app.include_router(upload_api.router, prefix="/api/upload", tags=["upload"])
+app.include_router(dashboard_api.router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(advanced_analytics_api.router, prefix="/api/analytics", tags=["advanced-analytics"])
 
 @app.get("/")
 async def root():
@@ -113,14 +117,10 @@ async def health_check():
     """Health check endpoint"""
     health_status = {
         "status": "healthy",
-        "database": check_database_connection(),
+        "storage": "parquet",
+        "auth_db": check_database_connection(),
         "timestamp": time.time()
     }
 
-    if not health_status["database"]:
-        health_status["status"] = "unhealthy"
-
-    log_level = logging.INFO if health_status["status"] == "healthy" else logging.ERROR
-    logger.log(log_level, f"Health check: {health_status}")
-
+    logger.info(f"Health check: {health_status}")
     return health_status

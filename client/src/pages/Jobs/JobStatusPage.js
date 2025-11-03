@@ -33,7 +33,8 @@ function JobStatusPage() {
 
     const fetchJob = async () => {
       try {
-        const response = await fetch(`/api/job/${jobId}`);
+        const apiUrl = process.env.REACT_APP_API_URL || '';
+        const response = await fetch(`${apiUrl}/api/job/${jobId}`);
         if (!response.ok) {
           throw new Error('Failed to load job status');
         }

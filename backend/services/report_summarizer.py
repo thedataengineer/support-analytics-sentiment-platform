@@ -7,9 +7,7 @@ from reportlab.lib.units import inch
 import os
 from datetime import datetime, timedelta
 import io
-from sqlalchemy import func
-from ..database import SessionLocal
-from ..models.sentiment_result import SentimentResult
+from storage.storage_manager import StorageManager
 
 def generate_pdf_report(start_date: str, end_date: str) -> str:
     """
@@ -51,27 +49,23 @@ def generate_pdf_report(start_date: str, end_date: str) -> str:
     ))
     story.append(Spacer(1, 24))
 
-    # Query real data from database using comment_timestamp
-    db = SessionLocal()
+    # Query real data from DuckDB
+    storage = StorageManager()
     try:
-        start = datetime.strptime(start_date, "%Y-%m-%d")
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-
-        # Query sentiment distribution based on comment_timestamp
-        distribution = (
-            db.query(
-                SentimentResult.sentiment,
-                func.count(SentimentResult.id).label("count"),
-            )
-            .filter(SentimentResult.comment_timestamp >= start)
-            .filter(SentimentResult.comment_timestamp <= end + timedelta(days=1))
-            .group_by(SentimentResult.sentiment)
-            .all()
-        )
-
+        # Query sentiment distribution
+        query = f"""
+        SELECT sentiment, COUNT(*) as count
+        FROM sentiment_results 
+        WHERE comment_timestamp >= '{start_date}' 
+        AND comment_timestamp <= '{end_date}'
+        GROUP BY sentiment
+        """
+        
+        distribution = storage.duckdb_client.execute_query(query)
+        
         sentiment_data = {"positive": 0, "negative": 0, "neutral": 0}
-        for sentiment, count in distribution:
-            sentiment_data[sentiment] = count
+        for row in distribution:
+            sentiment_data[row[0]] = row[1]
 
         # Get total count of records
         total_count = sum(sentiment_data.values())
@@ -83,8 +77,10 @@ def generate_pdf_report(start_date: str, end_date: str) -> str:
         story.append(Paragraph(f"Neutral: {sentiment_data['neutral']:,} ({sentiment_data['neutral']/total_count*100:.1f}%)" if total_count > 0 else "Neutral: 0 (0.0%)", styles['Normal']))
         story.append(Spacer(1, 24))
 
-    finally:
-        db.close()
+    except Exception as e:
+        print(f"Error querying sentiment data: {e}")
+        sentiment_data = {"positive": 0, "negative": 0, "neutral": 0}
+        total_count = 0
 
     # Generate and add chart
     chart_path = generate_sentiment_chart(sentiment_data, start_date, end_date)

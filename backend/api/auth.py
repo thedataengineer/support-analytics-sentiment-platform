@@ -10,16 +10,16 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from ..database import get_db
-from ..models.user import User
+from database import get_db
+from models.user import User
 
 load_dotenv()
 
 router = APIRouter()
 security = HTTPBearer()
 
-# Password hashing - use bcrypt for production
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing - use pbkdf2 for production (bcrypt has issues)
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"])
 
 # JWT settings
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -178,3 +178,39 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
     )
 
     return {"access_token": access_token, "token_type": "bearer"}
+
+@router.post("/bootstrap")
+async def bootstrap_admin(db: Session = Depends(get_db)):
+    """
+    Bootstrap initial admin user. Only works if no users exist.
+    Creates admin@example.com with password 'password'.
+
+    This endpoint is for initial setup only and will fail if users already exist.
+    """
+    # Check if any users exist
+    user_count = db.query(User).count()
+    if user_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Users already exist. Bootstrap can only be run on empty database."
+        )
+
+    # Create initial admin user
+    hashed_password = get_password_hash("password")
+    admin_user = User(
+        email="admin@example.com",
+        hashed_password=hashed_password,
+        role="admin",
+        is_active="Y"
+    )
+
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+
+    return {
+        "message": "Initial admin user created successfully",
+        "email": "admin@example.com",
+        "password": "password",
+        "role": "admin"
+    }
